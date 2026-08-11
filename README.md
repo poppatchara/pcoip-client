@@ -21,9 +21,9 @@ makepkg -si
 
 ## Notes
 
-- The PKGBUILD fetches the upstream client `.deb` plus the Ubuntu `libprotobuf23` it expects for ABI compatibility.
-- Main package depends on system Qt, X11/XCB, audio, and VA-API; optional VA-API drivers are surfaced via `optdepends`.
-- A wrapper forces `QT_QPA_PLATFORM=xcb` and the bundled Wayland Qt platform plugins are removed (upstream Wayland build is broken against Arch Qt).
+- The PKGBUILD fetches the upstream client `.deb`, the Ubuntu `libprotobuf32` it expects for ABI compatibility, and the Qt 6.9.2 `libQt6WaylandClient`/`libQt6WaylandEglClientHwIntegration` from the Arch package archive.
+- Main package depends on system Qt, X11/XCB, Wayland, audio, and VA-API; optional VA-API drivers are surfaced via `optdepends`.
+- The wrapper prefers native Wayland when `WAYLAND_DISPLAY` is set and falls back to X11/XCB. The bundled Wayland Qt platform plugins are kept and pointed at the vendored Qt 6.9 Wayland client libs so they load against the client's bundled Qt 6.9.3 (Arch's `qt6-wayland` is too new and requires `Qt_6.11` symbols).
 - The clipboard plugin now pulls in `graphicsmagick` and is patched to link against the Arch SONAME.
 - Capabilities for the client and USB helper are baked into the package during build; if they get lost, re-apply them manually (see troubleshooting).
 - The upstream `.desktop` file is patched to avoid registering the `pcoip://` URL handler (to prevent collisions with dedicated URL-handler packages).

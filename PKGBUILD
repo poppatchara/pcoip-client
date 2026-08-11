@@ -25,12 +25,14 @@ depends=(
   'libxcb>=1.7.5'
   'libxext'
   'libxi>=1.2.99.4'
+  'libxkbcommon>=0.5.0'
   'libxkbcommon-x11>=0.5.0'
   'mesa>=21.1.0'
   'nspr>=4.9'
   'nss>=3.30'
   'pcsclite>=1.3.3'
   'systemd>=183'
+  'wayland>=1.20.0'
   'xcb-util>=0.4.0'
   'xcb-util-cursor>=0.1.4'
   'xcb-util-image>=0.2.1'
@@ -48,22 +50,49 @@ optdepends=(
 )
 makedepends=('fakeroot' 'patchelf')
 options=('!strip')
+# The client bundles Qt 6.9.3 but does not ship a Wayland platform of its own:
+# it expects libQt6WaylandClient from the system. Arch's qt6-wayland is too new
+# (it needs Qt_6.11 symbols), so we vendor the matching 6.9.x Wayland client
+# libs from the Arch archive to make the bundled Wayland platform plugin load.
 source=(
   "https://dl.anyware.hp.com/pcoip-client/deb/ubuntu/pool/main/p/pcoip-client/pcoip-client_${pkgver}-${_ubuntuver}_amd64.deb"
   "http://archive.ubuntu.com/ubuntu/pool/main/p/protobuf/libprotobuf32t64_3.21.12-8.2ubuntu0.3_amd64.deb"
+  "https://archive.archlinux.org/packages/q/qt6-wayland/qt6-wayland-6.9.2-1-x86_64.pkg.tar.zst"
 )
 
 sha256sums=(
   'e62de695a928318a57af0ab7374bf7ad788de236032046a1bb7c27b646abaae9'
   '0b0dd45060288fbe5505b4b3c86e6222d6f4214574f653b2a7d0bbe72d5c6d87'
+  'eb7e8753e3945a045d9579e2faa2a54ec727274304de1b93caebe61b48be45bd'
 )
 
 prepare() {
   cd "$srcdir"
-  mkdir -p pcoip-client libprotobuf
+  mkdir -p pcoip-client libprotobuf qt6-wayland
   # Unpack upstream client and the Ubuntu runtime dep we vendor.
   bsdtar -C pcoip-client -xf pcoip-client_${pkgver}-${_ubuntuver}_amd64.deb
   bsdtar -C libprotobuf -xf libprotobuf32t64_3.21.12-8.2ubuntu0.3_amd64.deb
+  # Unpack the matching Wayland client libs for the bundled Qt 6.9.3.
+  bsdtar -C qt6-wayland -xf qt6-wayland-6.9.2-1-x86_64.pkg.tar.zst \
+    ./usr/lib/libQt6WaylandClient.so.6.9.2 \
+    ./usr/lib/libQt6WaylandEglClientHwIntegration.so.6.9.2
+
+  # Qt aborts when it loads a library whose QObjectPrivateVersion differs from
+  # the app's Qt, even for ABI-compatible patch releases. The client bundles
+  # Qt 6.9.3 but only 6.9.2 Wayland client libs exist, so bump the embedded
+  # version constant (0x060902 -> 0x060903). Safe: same minor, patch-only diff.
+  python3 - <<'EOF'
+import struct
+path = 'qt6-wayland/usr/lib/libQt6WaylandClient.so.6.9.2'
+data = bytearray(open(path, 'rb').read())
+needle = struct.pack('<I', 0x060902)
+replacement = struct.pack('<I', 0x060903)
+n = data.count(needle)
+assert n > 0, 'QObjectPrivateVersion constant not found'
+data = data.replace(needle, replacement)
+open(path, 'wb').write(bytes(data))
+print(f'patched {n} QObjectPrivateVersion constant(s) 6.9.2 -> 6.9.3')
+EOF
 }
 
 package_pcoip-client() {
@@ -77,11 +106,15 @@ package_pcoip-client() {
   mv "$pkgdir"/usr/sbin/pcoip-configure-kernel-networking "$pkgdir"/usr/bin/
   rm -rf "$pkgdir"/usr/sbin
 
-  # Force X11/XCB because we drop the broken Wayland Qt plugin.
+  # Prefer native Wayland when available (e.g. under Niri), fall back to X11/XCB.
   rm "$pkgdir"/usr/bin/pcoip-client
   cat <<'EOF' > "$pkgdir"/usr/bin/pcoip-client
 #!/bin/sh
-export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; then
+  export QT_QPA_PLATFORM=wayland
+else
+  export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+fi
 exec /usr/libexec/pcoip-client/pcoip-client "$@"
 EOF
   chmod +x "$pkgdir/usr/bin/pcoip-client"
@@ -94,9 +127,6 @@ EOF
     "$pkgdir"/usr/lib/x86_64-linux-gnu/pcoip-client/pkgconfig \
     "$pkgdir"/usr/share/man
 
-  # Drop Wayland Qt platform plugins that fail with system libQt6WaylandClient.
-  rm -f "$pkgdir"/usr/lib/x86_64-linux-gnu/pcoip-client/plugins/platforms/libqwayland-*.so
-
   # Bundle Ubuntu protobuf for ABI compatibility.
   tar -C "$pkgdir"/ -xf "$srcdir"/libprotobuf/data.tar.zst \
     ./usr/lib/x86_64-linux-gnu/libprotobuf.so.32.0.12
@@ -104,6 +134,19 @@ EOF
   # Keep vendor libs contained and provide the expected SONAME symlink.
   mv "$pkgdir"/usr/lib/x86_64-linux-gnu/lib*.so* "$vendor_root"/
   ln -s libprotobuf.so.32.0.12 "$vendor_root"/libprotobuf.so.32
+
+  # Vendor a matching Qt 6.9 Wayland client for the bundled Qt 6.9.3 so the
+  # upstream Wayland platform plugin loads (system qt6-wayland needs Qt_6.11).
+  cp "$srcdir"/qt6-wayland/usr/lib/libQt6WaylandClient.so.6.9.2 "$vendor_root"/
+  cp "$srcdir"/qt6-wayland/usr/lib/libQt6WaylandEglClientHwIntegration.so.6.9.2 "$vendor_root"/
+  ln -s libQt6WaylandClient.so.6.9.2 "$vendor_root"/libQt6WaylandClient.so.6
+  ln -s libQt6WaylandEglClientHwIntegration.so.6.9.2 "$vendor_root"/libQt6WaylandEglClientHwIntegration.so.6
+
+  # Point the Wayland plugins at the vendored Qt libs (plugins live in
+  # <vendor_root>/plugins/*, two levels below <vendor_root>).
+  for plugin in "$pkgdir"/usr/lib/x86_64-linux-gnu/pcoip-client/plugins/{platforms,wayland-decoration-client,wayland-graphics-integration-client,wayland-shell-integration}/*.so; do
+    [ -e "$plugin" ] && patchelf --set-rpath '$ORIGIN/../..' "$plugin"
+  done
 
   # Qt looks for a sibling lib/ directory.
   ln -s . "$vendor_root"/lib
